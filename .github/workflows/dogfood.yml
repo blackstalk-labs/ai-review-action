@@ -1,0 +1,31 @@
+name: Dogfood
+
+# Runs this repo's own action against its own pull requests — the
+# clearest possible demonstration that it works, and a smoke test that
+# catches action.yml/ai_review.py breakage that unit tests alone might
+# miss (e.g. an input wiring mistake in action.yml).
+#
+# Skips gracefully (exits 0) if ANTHROPIC_API_KEY isn't configured on
+# this repo, same as it would for any consumer.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  self-review:
+    name: Review this PR with this action
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run this action against itself
+        uses: ./
+        with:
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          base-ref: origin/${{ github.event.pull_request.base.ref }}
+          fail-on-severity: CRITICAL,HIGH

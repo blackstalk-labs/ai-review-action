@@ -1,0 +1,45 @@
+[project]
+name = "ai-review-action"
+version = "1.0.0"
+description = "AI-powered pull request review focused on production risk — a drop-in GitHub Action for any stack."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+# Deliberately zero runtime dependencies — this script runs as a GitHub
+# Action step with no install step, on any GitHub-hosted runner.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.6.0",
+    "mypy>=1.11.0",
+]
+
+[tool.setuptools]
+py-modules = ["ai_review"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+exclude = ["tests/"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --cov=ai_review --cov-report=term-missing --cov-fail-under=85"
+
+[tool.coverage.run]
+source = ["ai_review"]
