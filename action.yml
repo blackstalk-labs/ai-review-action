@@ -57,9 +57,13 @@ inputs:
     required: false
     default: 'true'
   github-token:
-    description: 'Token used to post the PR comment.'
+    description: >-
+      Token used to post the PR comment. Defaults to the workflow's own
+      GITHUB_TOKEN at the call site (see the "Post or update PR comment"
+      step) — action metadata `inputs.*.default` fields can't reference
+      the `github` context directly, so the fallback lives there instead.
     required: false
-    default: ${{ github.token }}
+    default: ''
 
 outputs:
   findings-file:
@@ -94,7 +98,7 @@ runs:
       if: inputs.post-comment == 'true' && always()
       uses: actions/github-script@v7
       with:
-        github-token: ${{ inputs.github-token }}
+        github-token: ${{ inputs.github-token || github.token }}
         script: |
           const fs = require('fs');
           const body = fs.readFileSync('ai-review-comment.md', 'utf8');

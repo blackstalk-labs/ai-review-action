@@ -68,7 +68,7 @@ becomes a reason all merges are blocked.
 | `fail-on-severity` | No | `CRITICAL,HIGH` | Severities that fail this check. Lower severities are still posted, just non-blocking. |
 | `system-prompt-path` | No | bundled `prompts/code-review.md` | Path (in the consuming repo) to a custom reviewer prompt. |
 | `post-comment` | No | `true` | Whether to post/update a PR comment with findings. |
-| `github-token` | No | `${{ github.token }}` | Token used to post the comment. |
+| `github-token` | No | workflow's `GITHUB_TOKEN` | Token used to post the comment. |
 
 ## Outputs
 
