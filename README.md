@@ -6,7 +6,7 @@ GitHub Action for any language or stack: point it at a PR diff and a
 GitHub secret, get severity-classified findings back as a PR comment.
 
 This action is the reusable review layer extracted from
-[`ai-and-system-production-pipeline`](https://github.com/blackstalk/ai-and-system-production-pipeline),
+[`ai-and-system-production-pipeline`](https://github.com/blackstalk-labs/ai-and-system-production-pipeline),
 a reference architecture for AI-assisted production delivery. That repo
 documents the full pipeline this action is one layer of — worth reading if
 you're deciding how to wire this into a merge gate, not just how to call it.
@@ -46,7 +46,7 @@ jobs:
         with:
           fetch-depth: 0   # required — the action diffs against base-ref
 
-      - uses: blackstalk/ai-review-action@v1
+      - uses: blackstalk-labs/ai-review-action@v1
         with:
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           base-ref: origin/${{ github.event.pull_request.base.ref }}
@@ -110,7 +110,7 @@ the model.
 ### Python
 
 ```yaml
-- uses: blackstalk/ai-review-action@v1
+- uses: blackstalk-labs/ai-review-action@v1
   with:
     anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
     base-ref: origin/${{ github.event.pull_request.base.ref }}
@@ -120,7 +120,7 @@ the model.
 ### PHP
 
 ```yaml
-- uses: blackstalk/ai-review-action@v1
+- uses: blackstalk-labs/ai-review-action@v1
   with:
     anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
     base-ref: origin/${{ github.event.pull_request.base.ref }}
@@ -137,7 +137,7 @@ paths get excluded from the diff.
 Deterministic tooling (linters, type checkers, security scanners) and human
 approval remain required regardless of what this action finds — see
 `docs/adr/001-ai-review-is-not-authoritative.md` in the
-[reference architecture repo](https://github.com/blackstalk/ai-and-system-production-pipeline)
+[reference architecture repo](https://github.com/blackstalk-labs/ai-and-system-production-pipeline)
 for the reasoning. In short: LLM output is probabilistic, not
 deterministic — treating it as an unbypassable gate would make production
 safety depend on a non-reproducible check. This action fails its own status
