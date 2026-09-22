@@ -444,3 +444,56 @@ def test_largest_files_in_diff_orders_by_lines_changed(
     listing = ai_review.largest_files_in_diff(base_sha, [])
 
     assert listing.index("big.js") < listing.index("small.js")
+
+
+def _fake_api_response(payload: dict) -> MagicMock:
+    resp = MagicMock()
+    resp.read.return_value = json.dumps(payload).encode("utf-8")
+    resp.__enter__.return_value = resp
+    resp.__exit__.return_value = False
+    return resp
+
+
+def test_reviewer_raises_when_thinking_consumed_the_token_budget() -> None:
+    """Thinking blocks carry empty text by default, so a response can be
+    non-empty yet contain nothing reviewable."""
+    payload = {
+        "content": [{"type": "thinking", "thinking": ""}],
+        "stop_reason": "max_tokens",
+    }
+
+    with patch("ai_review.urllib.request.urlopen", return_value=_fake_api_response(payload)):
+        reviewer = ai_review.AnthropicReviewer(api_key="k", model="claude-opus-5")
+        with pytest.raises(RuntimeError, match="no text content") as excinfo:
+            reviewer.review(diff="d", system_prompt="p")
+
+    message = str(excinfo.value)
+    assert "max_tokens" in message, "must name the stop_reason so the cause is actionable"
+    assert "thinking" in message
+
+
+def test_reviewer_accepts_text_alongside_thinking_blocks() -> None:
+    payload = {
+        "content": [{"type": "thinking", "thinking": ""}, {"type": "text", "text": "[]"}],
+        "stop_reason": "end_turn",
+    }
+
+    with patch("ai_review.urllib.request.urlopen", return_value=_fake_api_response(payload)):
+        reviewer = ai_review.AnthropicReviewer(api_key="k", model="claude-opus-5")
+        assert reviewer.review(diff="d", system_prompt="p") == "[]"
+
+
+def test_reviewer_failure_message_reaches_the_pr_comment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base_sha = _init_git_repo(tmp_path)
+    _commit_change(tmp_path, "changed\n")
+    monkeypatch.setattr(
+        ai_review,
+        "build_reviewer",
+        lambda provider: _ExplodingReviewer(RuntimeError("stop_reason='max_tokens'")),
+    )
+
+    _, output_path, _ = _run_main(tmp_path, monkeypatch, base_sha)
+
+    assert "max_tokens" in output_path.read_text(), "diagnostic must not be logs-only"

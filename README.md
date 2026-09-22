@@ -62,7 +62,7 @@ becomes a reason all merges are blocked.
 |---|---|---|---|
 | `anthropic-api-key` | No | — | API key. Unset → skip gracefully. |
 | `provider` | No | `anthropic` | Reviewer backend. Only `anthropic` is implemented today — see [Adding a provider](#adding-a-provider). |
-| `model` | No | `claude-sonnet-5` | Model name. |
+| `model` | No | `claude-opus-5` | Model name. Set `claude-sonnet-5` for cheaper reviews. |
 | `base-ref` | **Yes** | — | Ref to diff `HEAD` against, e.g. `origin/main`. Requires `fetch-depth: 0` on checkout. |
 | `exclude-paths` | No | `''` | Comma/space-separated pathspecs to exclude, e.g. `vendor node_modules`. **A bare name matches only at the repo root** — see below. |
 | `fail-on-severity` | No | `CRITICAL,HIGH` | Severities that fail this check. Lower severities are still posted, just non-blocking. |

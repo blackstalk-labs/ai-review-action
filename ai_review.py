@@ -85,7 +85,10 @@ class AnthropicReviewer:
     def review(self, diff: str, system_prompt: str) -> str:
         body = {
             "model": self._model,
-            "max_tokens": 4096,
+            # Current models think by default, and that thinking is billed
+            # against max_tokens. At 4096 the budget was exhausted before any
+            # text block was produced, so the response parsed as empty.
+            "max_tokens": 16000,
             "system": system_prompt,
             "messages": [
                 {
@@ -109,17 +112,31 @@ class AnthropicReviewer:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=120) as response:
+            with urllib.request.urlopen(request, timeout=300) as response:
                 payload = json.loads(response.read())
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"Anthropic API error {exc.code}: {detail}") from exc
 
-        return "".join(
+        text = "".join(
             block.get("text", "")
             for block in payload.get("content", [])
             if block.get("type") == "text"
         )
+        if not text.strip():
+            # Thinking blocks come back with empty text by default on current
+            # models, so a response can be non-empty yet carry no reviewable
+            # text. Say which case this is instead of surfacing it downstream
+            # as an unexplained JSON parse failure.
+            block_types = sorted({b.get("type", "?") for b in payload.get("content", [])})
+            raise RuntimeError(
+                f"Model returned no text content "
+                f"(stop_reason={payload.get('stop_reason')!r}, "
+                f"blocks={block_types or 'none'}). "
+                "If stop_reason is 'max_tokens', raise max_tokens — thinking is "
+                "billed against it."
+            )
+        return text
 
 
 def parse_exclude_paths(raw: str) -> list[str]:
@@ -233,7 +250,7 @@ def build_reviewer(provider: str) -> Reviewer | None:
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
             return None
-        model = os.getenv("AI_REVIEW_MODEL", "claude-sonnet-5")
+        model = os.getenv("AI_REVIEW_MODEL", "claude-opus-5")
         return AnthropicReviewer(api_key=api_key, model=model)
 
     raise NotImplementedError(
@@ -321,10 +338,10 @@ def main() -> int:
     except (RuntimeError, OSError) as exc:
         print(f"Reviewer call failed: {exc}", file=sys.stderr)
         Path(args.output).write_text(
-            "## AI Review\n\nThe reviewer could not be reached this run "
-            f"(`{type(exc).__name__}`). Treat this as a tooling failure, not a "
-            "signal about the code — deterministic checks and human review still "
-            "apply.\n"
+            "## AI Review\n\nThe reviewer failed this run. Treat this as a "
+            "tooling failure, not a signal about the code — deterministic checks "
+            "and human review still apply.\n\n"
+            f"```\n{str(exc)[:1500]}\n```\n"
         )
         write_github_output("findings-file", args.output)
         write_github_output("blocking-count", "0")

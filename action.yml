@@ -23,7 +23,7 @@ inputs:
   model:
     description: 'Model name to use for review.'
     required: false
-    default: 'claude-sonnet-5'
+    default: 'claude-opus-5'
   base-ref:
     description: >-
       Git ref to diff HEAD against, e.g. origin/main. Typically set to
