@@ -64,8 +64,9 @@ becomes a reason all merges are blocked.
 | `provider` | No | `anthropic` | Reviewer backend. Only `anthropic` is implemented today — see [Adding a provider](#adding-a-provider). |
 | `model` | No | `claude-sonnet-5` | Model name. |
 | `base-ref` | **Yes** | — | Ref to diff `HEAD` against, e.g. `origin/main`. Requires `fetch-depth: 0` on checkout. |
-| `exclude-paths` | No | `''` | Comma/space-separated pathspecs to exclude, e.g. `vendor node_modules`. |
+| `exclude-paths` | No | `''` | Comma/space-separated pathspecs to exclude, e.g. `vendor node_modules`. **A bare name matches only at the repo root** — see below. |
 | `fail-on-severity` | No | `CRITICAL,HIGH` | Severities that fail this check. Lower severities are still posted, just non-blocking. |
+| `max-diff-bytes` | No | `600000` | Skip the review (non-blocking) above this diff size, rather than letting the model reject an over-long prompt. |
 | `system-prompt-path` | No | bundled `prompts/code-review.md` | Path (in the consuming repo) to a custom reviewer prompt. |
 | `post-comment` | No | `true` | Whether to post/update a PR comment with findings. |
 | `github-token` | No | workflow's `GITHUB_TOKEN` | Token used to post the comment. |
@@ -107,6 +108,21 @@ This action is language-agnostic — it only ever sees a `git diff`. The
 build output, generated code) gets filtered out before the diff is sent to
 the model.
 
+> **Exclude nested directories with `*/name/*`, not `name`.**
+> These are git pathspecs, so a bare `dist` excludes only a **top-level**
+> `dist/`. A bundle at `themes/my-theme/dist/main.bundle.js` still reaches
+> the model. That one character cost a real debugging cycle here: a 55 KB
+> source diff arrived as 2.6 MB and the API rejected it with
+> `prompt is too long: 1442393 tokens > 1000000 maximum`.
+>
+> ```yaml
+> exclude-paths: "*/node_modules/* */vendor/* */dist/*"
+> ```
+>
+> The `max-diff-bytes` guard now catches this case and names the offending
+> files instead of failing opaquely — but excluding them properly is still
+> what you want, since a skipped review reviews nothing.
+
 ### Python
 
 ```yaml
@@ -114,7 +130,7 @@ the model.
   with:
     anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
     base-ref: origin/${{ github.event.pull_request.base.ref }}
-    exclude-paths: "tests fixtures"
+    exclude-paths: "*/tests/* */fixtures/*"
 ```
 
 ### PHP
@@ -124,7 +140,7 @@ the model.
   with:
     anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
     base-ref: origin/${{ github.event.pull_request.base.ref }}
-    exclude-paths: "vendor storage/framework bootstrap/cache"
+    exclude-paths: "*/vendor/* */storage/framework/* */bootstrap/cache/*"
 ```
 
 The prompt's security/reliability/business-logic categories (SQL injection,

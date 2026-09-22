@@ -56,6 +56,10 @@ DEFAULT_PROMPT_PATH = ACTION_DIR / "prompts" / "code-review.md"
 SEVERITY_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFORMATIONAL"]
 DEFAULT_BLOCKING_SEVERITIES = {"CRITICAL", "HIGH"}
 
+# Roughly 150k tokens of diff — comfortably inside current context windows
+# while leaving room for the system prompt and the response.
+DEFAULT_MAX_DIFF_BYTES = 600_000
+
 
 class Reviewer(Protocol):
     def review(self, diff: str, system_prompt: str) -> str:
@@ -131,6 +135,36 @@ def get_diff(base_ref: str, exclude_paths: list[str]) -> str:
         check=True,
     )
     return result.stdout
+
+
+def largest_files_in_diff(base_ref: str, exclude_paths: list[str], limit: int = 5) -> str:
+    """Markdown list of the files contributing most to the diff.
+
+    Used only to make an over-limit diff actionable — naming the files
+    turns "too big" into "exclude these".
+    """
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["git", "diff", "--numstat", f"{base_ref}...HEAD", "--", ".", *exclude_paths],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        return ""
+
+    rows: list[tuple[int, str]] = []
+    for line in result.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3:
+            continue
+        added, removed, path = parts
+        if added == "-" or removed == "-":  # binary
+            continue
+        rows.append((int(added) + int(removed), path))
+
+    rows.sort(reverse=True)
+    return "\n".join(f"- `{path}` ({changed:,} changed lines)" for changed, path in rows[:limit])
 
 
 def parse_findings(raw_response: str) -> list[dict[str, Any]]:
@@ -254,8 +288,48 @@ def main() -> int:
         write_github_output("blocking-count", "0")
         return 0
 
+    # A single generated file (a minified bundle, a lockfile, a vendored
+    # dependency) can push the diff past the model's context window. Catch
+    # that here with an actionable message instead of letting the API
+    # reject it as an opaque 400 mid-run.
+    max_diff_bytes = int(os.getenv("MAX_DIFF_BYTES", str(DEFAULT_MAX_DIFF_BYTES)))
+    if len(diff.encode("utf-8")) > max_diff_bytes:
+        largest = largest_files_in_diff(args.base_ref, exclude_paths)
+        print(
+            f"Diff is {len(diff.encode('utf-8')):,} bytes, over the "
+            f"{max_diff_bytes:,} byte limit — skipping review.",
+            file=sys.stderr,
+        )
+        Path(args.output).write_text(
+            "## AI Review\n\n"
+            f"Skipped: the diff is {len(diff.encode('utf-8')):,} bytes, over this "
+            f"action's {max_diff_bytes:,} byte limit.\n\n"
+            "This usually means generated files are reaching the reviewer. Add them "
+            "to `exclude-paths` — note that a bare name like `dist` only matches a "
+            "**top-level** directory, so nested build output needs `*/dist/*`.\n\n"
+            + (f"Largest files in this diff:\n\n{largest}\n\n" if largest else "")
+            + "Raise `max-diff-bytes` if the diff is legitimately this large.\n"
+        )
+        write_github_output("findings-file", args.output)
+        write_github_output("blocking-count", "0")
+        # Too large to review is a tooling limit, not a signal about the code.
+        return 0
+
     system_prompt = prompt_path.read_text()
-    raw_response = reviewer.review(diff=diff, system_prompt=system_prompt)
+    try:
+        raw_response = reviewer.review(diff=diff, system_prompt=system_prompt)
+    except (RuntimeError, OSError) as exc:
+        print(f"Reviewer call failed: {exc}", file=sys.stderr)
+        Path(args.output).write_text(
+            "## AI Review\n\nThe reviewer could not be reached this run "
+            f"(`{type(exc).__name__}`). Treat this as a tooling failure, not a "
+            "signal about the code — deterministic checks and human review still "
+            "apply.\n"
+        )
+        write_github_output("findings-file", args.output)
+        write_github_output("blocking-count", "0")
+        # An unreachable reviewer must never become a way to block all merges.
+        return 0
 
     try:
         findings = parse_findings(raw_response)

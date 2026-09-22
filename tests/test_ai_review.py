@@ -340,3 +340,107 @@ def test_main_returns_zero_on_unparseable_model_response(
 
     assert exit_code == 0
     assert "unparseable" in output_path.read_text()
+
+
+# --- oversized diff and reviewer failures ---------------------------------
+
+
+class _ExplodingReviewer:
+    """Stands in for the Anthropic API rejecting an over-long prompt."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    def review(self, diff: str, system_prompt: str) -> str:
+        raise self._exc
+
+
+def _commit_change(tmp_path: Path, content: str) -> None:
+    (tmp_path / "file.txt").write_text(content)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "change"], cwd=tmp_path, check=True)
+
+
+def test_main_skips_when_diff_exceeds_max_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base_sha = _init_git_repo(tmp_path)
+    _commit_change(tmp_path, "x\n" * 20000)
+    monkeypatch.setenv("MAX_DIFF_BYTES", "1000")
+    # Would raise if the guard failed to short-circuit before the API call.
+    monkeypatch.setattr(
+        ai_review,
+        "build_reviewer",
+        lambda provider: _ExplodingReviewer(AssertionError("reviewer must not be called")),
+    )
+
+    exit_code, output_path, github_output = _run_main(tmp_path, monkeypatch, base_sha)
+
+    body = output_path.read_text()
+    assert exit_code == 0, "an over-large diff is a tooling limit, not a merge blocker"
+    assert "over this action's" in body
+    assert "exclude-paths" in body, "message must say how to fix it"
+    assert "blocking-count=0" in github_output.read_text()
+
+
+def test_oversize_message_names_the_largest_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base_sha = _init_git_repo(tmp_path)
+    (tmp_path / "bundle.min.js").write_text("y\n" * 5000)
+    _commit_change(tmp_path, "x\n" * 100)
+    monkeypatch.setenv("MAX_DIFF_BYTES", "500")
+    monkeypatch.setattr(ai_review, "build_reviewer", lambda provider: _StubReviewer("[]"))
+
+    _, output_path, _ = _run_main(tmp_path, monkeypatch, base_sha)
+
+    assert "bundle.min.js" in output_path.read_text()
+
+
+def test_main_does_not_block_when_reviewer_call_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base_sha = _init_git_repo(tmp_path)
+    _commit_change(tmp_path, "changed\n")
+    monkeypatch.setattr(
+        ai_review,
+        "build_reviewer",
+        lambda provider: _ExplodingReviewer(RuntimeError("Anthropic API error 400: too long")),
+    )
+
+    exit_code, output_path, github_output = _run_main(tmp_path, monkeypatch, base_sha)
+
+    assert exit_code == 0, "an unreachable reviewer must never block all merges"
+    assert "tooling failure" in output_path.read_text()
+    assert "blocking-count=0" in github_output.read_text()
+
+
+def test_output_file_always_written_even_on_reviewer_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard: the comment step reads this file unconditionally."""
+    base_sha = _init_git_repo(tmp_path)
+    _commit_change(tmp_path, "changed\n")
+    monkeypatch.setattr(
+        ai_review,
+        "build_reviewer",
+        lambda provider: _ExplodingReviewer(OSError("connection reset")),
+    )
+
+    _, output_path, _ = _run_main(tmp_path, monkeypatch, base_sha)
+
+    assert output_path.is_file() and output_path.read_text().strip()
+
+
+def test_largest_files_in_diff_orders_by_lines_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base_sha = _init_git_repo(tmp_path)
+    (tmp_path / "big.js").write_text("a\n" * 500)
+    (tmp_path / "small.js").write_text("b\n" * 5)
+    _commit_change(tmp_path, "changed\n")
+    monkeypatch.chdir(tmp_path)
+
+    listing = ai_review.largest_files_in_diff(base_sha, [])
+
+    assert listing.index("big.js") < listing.index("small.js")

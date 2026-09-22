@@ -52,6 +52,13 @@ inputs:
       prompts/code-review.md.
     required: false
     default: ''
+  max-diff-bytes:
+    description: >-
+      Skip the review (non-blocking) if the diff exceeds this many bytes.
+      Guards against generated files blowing past the model's context
+      window. Default 600000, roughly 150k tokens.
+    required: false
+    default: '600000'
   post-comment:
     description: 'Whether to post/update a PR comment with findings.'
     required: false
@@ -92,6 +99,7 @@ runs:
         EXCLUDE_PATHS: ${{ inputs.exclude-paths }}
         FAIL_ON_SEVERITY: ${{ inputs.fail-on-severity }}
         SYSTEM_PROMPT_PATH: ${{ inputs.system-prompt-path }}
+        MAX_DIFF_BYTES: ${{ inputs.max-diff-bytes }}
       run: python "${{ github.action_path }}/ai_review.py" --base-ref "$BASE_REF" --output ai-review-comment.md
 
     - name: Post or update PR comment
@@ -101,7 +109,17 @@ runs:
         github-token: ${{ inputs.github-token || github.token }}
         script: |
           const fs = require('fs');
-          const body = fs.readFileSync('ai-review-comment.md', 'utf8');
+          // This step runs with always(), so it must tolerate the review
+          // step having died before writing its output — otherwise an
+          // ENOENT here masks the real failure upstream.
+          let body;
+          try {
+            body = fs.readFileSync('ai-review-comment.md', 'utf8');
+          } catch (err) {
+            body = '## AI Review\n\nThe review step failed before producing output. '
+              + 'See the workflow logs for the underlying error. Treat this as a '
+              + 'tooling failure, not a signal about the code.';
+          }
           const marker = '<!-- ai-review-action -->';
           const commentBody = `${marker}\n${body}`;
 
