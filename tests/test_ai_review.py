@@ -243,7 +243,7 @@ class _StubReviewer:
     def __init__(self, response: str) -> None:
         self._response = response
 
-    def review(self, diff: str, system_prompt: str) -> str:
+    def review(self, diff: str, system_prompt: str, context: str = "") -> str:
         return self._response
 
 
@@ -351,7 +351,7 @@ class _ExplodingReviewer:
     def __init__(self, exc: Exception) -> None:
         self._exc = exc
 
-    def review(self, diff: str, system_prompt: str) -> str:
+    def review(self, diff: str, system_prompt: str, context: str = "") -> str:
         raise self._exc
 
 
@@ -497,3 +497,105 @@ def test_reviewer_failure_message_reaches_the_pr_comment(
     _, output_path, _ = _run_main(tmp_path, monkeypatch, base_sha)
 
     assert "max_tokens" in output_path.read_text(), "diagnostic must not be logs-only"
+
+
+# --- changed-file context ----------------------------------------------------
+
+
+def test_build_file_context_includes_declarations_outside_the_diff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The regression this exists for: a diff alone hides declarations, so the
+    model reports identifiers as undefined when they are merely out of hunk."""
+    _init_git_repo(tmp_path)
+    # Declaration near the top, the change 200 lines below it — far outside
+    # any plausible -U context window. app.js must already exist at the base
+    # commit, or the whole file shows as added and the declaration lands in
+    # the hunk, defeating the point of the test.
+    # Indented inside a function, as in the real case: git's hunk header
+    # shows the enclosing function line, not the declaration.
+    body = "function init(data) {\n  const formName = data.formName;\n" + ("  // filler\n" * 200)
+    (tmp_path / "app.js").write_text(body + "  useIt(formId);\n}\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "add app.js"], cwd=tmp_path, check=True)
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    (tmp_path / "app.js").write_text(body + "  useIt(formName);\n}\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "use formName"], cwd=tmp_path, check=True)
+    monkeypatch.chdir(tmp_path)
+
+    diff = ai_review.get_diff(base_sha, [])
+    context = ai_review.build_file_context(base_sha, [], 400_000)
+
+    assert "const formName" not in diff, "precondition: the declaration is outside the hunk"
+    assert "const formName" in context, "context must carry the declaration the diff omits"
+
+
+def test_build_file_context_disabled_at_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base_sha = _init_git_repo(tmp_path)
+    _commit_change(tmp_path, "changed\n")
+    monkeypatch.chdir(tmp_path)
+
+    assert ai_review.build_file_context(base_sha, [], 0) == ""
+
+
+def test_build_file_context_names_files_it_had_to_omit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base_sha = _init_git_repo(tmp_path)
+    (tmp_path / "big.js").write_text("x\n" * 5000)
+    _commit_change(tmp_path, "changed\n")
+    monkeypatch.chdir(tmp_path)
+
+    context = ai_review.build_file_context(base_sha, [], 500)
+
+    assert "big.js" in context
+    assert "undefined" in context, "must warn the model off asserting about omitted files"
+
+
+def test_build_file_context_skips_deleted_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _init_git_repo(tmp_path)
+    (tmp_path / "gone.js").write_text("const a = 1;\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "add"], cwd=tmp_path, check=True)
+    mid = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    subprocess.run(["git", "rm", "-q", "gone.js"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "delete"], cwd=tmp_path, check=True)
+    monkeypatch.chdir(tmp_path)
+
+    # Must not raise on a path that no longer exists on disk.
+    assert "gone.js" not in ai_review.build_file_context(mid, [], 400_000)
+
+
+def test_reviewer_sends_context_before_the_diff() -> None:
+    payload = {"content": [{"type": "text", "text": "[]"}], "stop_reason": "end_turn"}
+    captured = {}
+
+    def capture(request, timeout):  # noqa: ANN001
+        captured["body"] = json.loads(request.data)
+        return _fake_api_response(payload)
+
+    with patch("ai_review.urllib.request.urlopen", side_effect=capture):
+        reviewer = ai_review.AnthropicReviewer(api_key="k", model="claude-opus-5")
+        reviewer.review(diff="THE_DIFF", system_prompt="p", context="THE_CONTEXT")
+
+    content = captured["body"]["messages"][0]["content"]
+    assert "THE_CONTEXT" in content and "THE_DIFF" in content
+    assert content.index("THE_CONTEXT") < content.index("THE_DIFF"), (
+        "definitions must precede the hunks that reference them"
+    )
+
+
+def test_prompt_forbids_undefined_claims_from_the_diff_alone() -> None:
+    prompt = ai_review.DEFAULT_PROMPT_PATH.read_text().lower()
+    assert "undefined" in prompt
+    assert "full file" in prompt or "full current contents" in prompt

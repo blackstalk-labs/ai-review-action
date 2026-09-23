@@ -67,6 +67,7 @@ becomes a reason all merges are blocked.
 | `exclude-paths` | No | `''` | Comma/space-separated pathspecs to exclude, e.g. `vendor node_modules`. **A bare name matches only at the repo root** — see below. |
 | `fail-on-severity` | No | `CRITICAL,HIGH` | Severities that fail this check. Lower severities are still posted, just non-blocking. |
 | `max-diff-bytes` | No | `600000` | Skip the review (non-blocking) above this diff size, rather than letting the model reject an over-long prompt. |
+| `max-context-bytes` | No | `400000` | Budget for full contents of changed files sent alongside the diff, so the reviewer can resolve identifiers declared outside the hunks. `0` sends the diff alone. |
 | `system-prompt-path` | No | bundled `prompts/code-review.md` | Path (in the consuming repo) to a custom reviewer prompt. |
 | `post-comment` | No | `true` | Whether to post/update a PR comment with findings. |
 | `github-token` | No | workflow's `GITHUB_TOKEN` | Token used to post the comment. |
@@ -148,6 +149,30 @@ auth bypass, swallowed exceptions, N+1 queries) apply identically regardless
 of language — nothing about the review logic changes per stack, only which
 paths get excluded from the diff.
 
+## Why full file contents are sent
+
+A `git diff` shows only changed hunks. Anything declared elsewhere in the file
+is invisible — so a reviewer working from the diff alone will report an
+identifier as undefined when its declaration simply sits outside the hunk.
+
+This happened in practice: a line changed to reference `formName`, declared
+267 lines earlier in the same function. The reviewer flagged it HIGH as a
+guaranteed `ReferenceError` that would "kill all form tracking." It was wrong,
+and it stayed wrong across three re-reviews, rewording each time — a false
+positive of this shape cannot self-correct, because every rerun sees the same
+truncated view. Wider `-U` context would not have helped at that distance.
+
+So the action now sends the full post-change contents of every changed file
+(subject to `max-context-bytes`), ahead of the diff, and the prompt instructs
+the model never to claim an identifier is undefined without checking them.
+Files dropped for budget are named, with an instruction not to assert anything
+about their contents.
+
+The general lesson is worth keeping in mind when reading any finding: **the
+reviewer only knows what it was given.** Verify a finding against the code
+before acting on it — which is [ADR-001](https://github.com/blackstalk-labs/ai-and-system-production-pipeline/blob/main/docs/adr/001-ai-review-is-not-authoritative.md)'s
+whole argument for why this check is not the merge gate.
+
 ## Where this fits
 
 Deterministic tooling (linters, type checkers, security scanners) and human
@@ -165,8 +190,11 @@ CI check.
 
 ```python
 class Reviewer(Protocol):
-    def review(self, diff: str, system_prompt: str) -> str: ...
+    def review(self, diff: str, system_prompt: str, context: str = "") -> str: ...
 ```
+
+`context` holds the full current contents of the files the diff touches. It is
+sent before the diff so definitions are read before the hunks referencing them.
 
 `AnthropicReviewer` in [`ai_review.py`](ai_review.py) is the only
 implementation shipped today. To add OpenAI, CodeRabbit, or an in-house

@@ -60,10 +60,21 @@ DEFAULT_BLOCKING_SEVERITIES = {"CRITICAL", "HIGH"}
 # while leaving room for the system prompt and the response.
 DEFAULT_MAX_DIFF_BYTES = 600_000
 
+# Budget for the full contents of changed files, sent alongside the diff so
+# the model can resolve identifiers declared outside the changed hunks.
+# Roughly 100k tokens; set to 0 to send the diff alone.
+DEFAULT_MAX_CONTEXT_BYTES = 400_000
+
 
 class Reviewer(Protocol):
-    def review(self, diff: str, system_prompt: str) -> str:
-        """Return the raw model response (expected to be a JSON array)."""
+    def review(self, diff: str, system_prompt: str, context: str = "") -> str:
+        """Return the raw model response (expected to be a JSON array).
+
+        `context` carries the full post-change contents of the changed files.
+        A diff alone shows only changed hunks, so anything declared elsewhere
+        in the file looks undefined — the reviewer would report a variable as
+        nonexistent when its declaration simply sat outside the hunk.
+        """
         ...
 
 
@@ -82,7 +93,17 @@ class AnthropicReviewer:
         self._api_key = api_key
         self._model = model
 
-    def review(self, diff: str, system_prompt: str) -> str:
+    def review(self, diff: str, system_prompt: str, context: str = "") -> str:
+        # File context goes before the diff so the model reads the definitions
+        # first and has them available when it reaches the changed hunks.
+        parts = []
+        if context:
+            parts.append(f"{context}\n")
+        parts.append(
+            "Review this pull request diff. Respond with the JSON array "
+            f"described in your instructions, nothing else.\n\n```diff\n{diff}\n```"
+        )
+
         body = {
             "model": self._model,
             # Current models think by default, and that thinking is billed
@@ -90,16 +111,7 @@ class AnthropicReviewer:
             # text block was produced, so the response parsed as empty.
             "max_tokens": 16000,
             "system": system_prompt,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": (
-                        "Review this pull request diff. Respond with the "
-                        "JSON array described in your instructions, nothing "
-                        f"else.\n\n```diff\n{diff}\n```"
-                    ),
-                }
-            ],
+            "messages": [{"role": "user", "content": "\n".join(parts)}],
         }
         request = urllib.request.Request(
             self.API_URL,
@@ -152,6 +164,81 @@ def get_diff(base_ref: str, exclude_paths: list[str]) -> str:
         check=True,
     )
     return result.stdout
+
+
+def changed_files(base_ref: str, exclude_paths: list[str]) -> list[str]:
+    """Paths changed in the diff, excluding ones deleted by it."""
+    try:
+        result = subprocess.run(  # noqa: S603
+            [
+                "git",
+                "diff",
+                "--name-only",
+                "--diff-filter=d",  # skip deletions: nothing left to read
+                f"{base_ref}...HEAD",
+                "--",
+                ".",
+                *exclude_paths,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        return []
+
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def build_file_context(base_ref: str, exclude_paths: list[str], max_bytes: int) -> str:
+    """Full post-change contents of the changed files, within a byte budget.
+
+    Without this the model sees only the changed hunks and cannot tell a
+    genuinely undefined identifier from one declared elsewhere in the same
+    file — a false-positive class that does not self-correct on re-review,
+    because re-running produces the same truncated view.
+
+    Files are added largest-budget-first in path order and the listing stops
+    once the budget is spent, so the model is told which files it did not
+    receive rather than silently reasoning from a partial set.
+    """
+    if max_bytes <= 0:
+        return ""
+
+    sections: list[str] = []
+    omitted: list[str] = []
+    used = 0
+
+    for path in changed_files(base_ref, exclude_paths):
+        try:
+            content = Path(path).read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            continue
+
+        block = f"\n--- {path} ---\n{content}\n"
+        if used + len(block.encode("utf-8")) > max_bytes:
+            omitted.append(path)
+            continue
+
+        sections.append(block)
+        used += len(block.encode("utf-8"))
+
+    if not sections:
+        return ""
+
+    header = (
+        "Full current contents of the files this diff touches. Use these to "
+        "resolve identifiers: a name declared here but outside the diff's "
+        "hunks is defined, not missing."
+    )
+    if omitted:
+        header += (
+            "\n\nNot included (context budget): "
+            + ", ".join(omitted)
+            + ". Do not assert that anything in these files is undefined."
+        )
+
+    return f"{header}\n{''.join(sections)}"
 
 
 def largest_files_in_diff(base_ref: str, exclude_paths: list[str], limit: int = 5) -> str:
@@ -332,9 +419,14 @@ def main() -> int:
         # Too large to review is a tooling limit, not a signal about the code.
         return 0
 
+    max_context_bytes = int(os.getenv("MAX_CONTEXT_BYTES", str(DEFAULT_MAX_CONTEXT_BYTES)))
+    file_context = build_file_context(args.base_ref, exclude_paths, max_context_bytes)
+    if file_context:
+        print(f"Including {len(file_context.encode('utf-8')):,} bytes of changed-file context.")
+
     system_prompt = prompt_path.read_text()
     try:
-        raw_response = reviewer.review(diff=diff, system_prompt=system_prompt)
+        raw_response = reviewer.review(diff=diff, system_prompt=system_prompt, context=file_context)
     except (RuntimeError, OSError) as exc:
         print(f"Reviewer call failed: {exc}", file=sys.stderr)
         Path(args.output).write_text(

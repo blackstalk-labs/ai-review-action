@@ -59,6 +59,14 @@ inputs:
       window. Default 600000, roughly 150k tokens.
     required: false
     default: '600000'
+  max-context-bytes:
+    description: >-
+      Budget for the full contents of changed files, sent alongside the
+      diff so the reviewer can resolve identifiers declared outside the
+      changed hunks. Without it a declaration sitting outside a hunk looks
+      undefined. Default 400000, roughly 100k tokens; 0 sends the diff alone.
+    required: false
+    default: '400000'
   post-comment:
     description: 'Whether to post/update a PR comment with findings.'
     required: false
@@ -100,6 +108,7 @@ runs:
         FAIL_ON_SEVERITY: ${{ inputs.fail-on-severity }}
         SYSTEM_PROMPT_PATH: ${{ inputs.system-prompt-path }}
         MAX_DIFF_BYTES: ${{ inputs.max-diff-bytes }}
+        MAX_CONTEXT_BYTES: ${{ inputs.max-context-bytes }}
       run: python "${{ github.action_path }}/ai_review.py" --base-ref "$BASE_REF" --output ai-review-comment.md
 
     - name: Post or update PR comment
